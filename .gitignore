@@ -1,0 +1,5 @@
+/target
+.vscode/device-events.env
+.vscode/
+resources/
+database-migrations/
