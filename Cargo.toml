@@ -30,3 +30,6 @@ tokio-stream = "0.1.12"
 tokio-util = { version = "0.7.7", features = ["io"] }
 urldecode = "0.1.1"
 regex = "1.9.3"
+wg = "0.3.2"
+futures = "0.3.28"
+atomic-counter = "1.0.1"

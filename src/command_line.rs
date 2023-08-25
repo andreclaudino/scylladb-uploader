@@ -37,6 +37,10 @@ pub struct CommandLine {
     #[clap(long, env = "BATCH_SIZE")]
     pub batch_size: u32,
 
+    /// Number of simultaneous batches to process simultaneously
+    #[clap(long, env = "CONCURRENT_BATCHES")]
+    pub concurrent_batches: usize,
+
     /// The S3 endpoint to connect and save file
     #[clap(long, env = "S3_ENDPOINT")]
     pub s3_endpoint: Option<String>,

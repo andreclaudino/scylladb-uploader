@@ -1,20 +1,23 @@
-use std::{cell::RefCell, collections::HashMap};
-use scylla::{Session, SessionBuilder, prepared_statement::PreparedStatement, batch::Batch};
-
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use atomic_counter::{AtomicCounter, RelaxedCounter};
+use scylla::{Session, SessionBuilder, prepared_statement::PreparedStatement};
+use wg::AsyncWaitGroup;
 use crate::entities::DataValue;
 
 
 pub struct DatabaseClient {
-    session: Session,
+    session: Arc<Session>,
     keyspace_name: String,
     table_name: String,
 
+    total_batches: Arc<RelaxedCounter>,
     prepared_statement: RefCell<Option<PreparedStatement>>,
-    field_names: RefCell<Vec<String>>
+    field_names: RefCell<Vec<String>>,
+    wait_group: RefCell<AsyncWaitGroup>,
 }
 
 impl DatabaseClient {
-
+    
     pub async fn new(nodes_string: &str, username: &str, password: &str, keyspace_name: &str,  table_name: &str) -> anyhow::Result<DatabaseClient> {
         let nodes = nodes_string.split(",").map(|u| u.to_owned() ).collect();
         let session = make_session(username, password, nodes).await?;
@@ -24,8 +27,10 @@ impl DatabaseClient {
                 session,
                 keyspace_name: keyspace_name.to_owned(),
                 table_name: table_name.to_owned(),
+                total_batches: Arc::new(RelaxedCounter::new(0)),
                 prepared_statement: RefCell::new(None),
                 field_names: RefCell::new(Vec::new()),
+                wait_group: RefCell::new(AsyncWaitGroup::new()),
             };
 
         Ok(database_client)
@@ -36,22 +41,14 @@ impl DatabaseClient {
             self.update_prepared_statement_and_field_names(&batch).await?;
         }
         
-        let mut command_batch = Batch::default();
-
         let preapared_statement = self.prepared_statement.borrow().clone().unwrap();
-        let mut values_batch: Vec<HashMap<String, DataValue>> = Vec::new();
+        let session = self.session.clone();
 
-        for serde_values in batch.iter() {
-            command_batch.append_statement(preapared_statement.clone());
-            let values: HashMap<String, DataValue> = DataValue::new(serde_values.to_owned()).into();
-            values_batch.push(values);
+        let upload_batch_task = upload_batch(session, batch, preapared_statement, self.wait_group.borrow().clone(), self.total_batches.clone());
 
-            // self.session.execute(&preapared_statement, &values).await?;
-        }
+        self.wait_group.borrow().add(1);
+        tokio::spawn(upload_batch_task);
         
-        // let values: Vec<HashMap<String, DataValue>> = batch.iter().map(|serde_value| DataValue::new(serde_value.to_owned()).into()).collect();
-        self.session.batch(&command_batch, &values_batch[..]).await?;
-
         Ok(())
     }
 
@@ -71,10 +68,13 @@ impl DatabaseClient {
         Ok(())
     }
 
+    pub async fn wait(&self) -> () {
+        self.wait_group.borrow().wait().await;
+    }
 }
 
 
-async fn make_session(username: &str, password: &str, nodes: Vec<String>) -> anyhow::Result<Session> {
+async fn make_session(username: &str, password: &str, nodes: Vec<String>) -> anyhow::Result<Arc<Session>> {
     let session =
         SessionBuilder::new()
             .known_nodes(nodes)
@@ -82,7 +82,7 @@ async fn make_session(username: &str, password: &str, nodes: Vec<String>) -> any
             .build()
             .await?;
 
-    Ok(session)
+    Ok(Arc::new(session))
 }
 
 
@@ -97,4 +97,19 @@ async fn make_prepared_statement(session: &Session, keyspace_name: &str, table_n
             .await?;
 
     Ok(prepared)
+}
+
+async fn upload_batch(session: Arc<Session>, batch: Vec<serde_json::Value>, preapared_statement: PreparedStatement, wait_group: AsyncWaitGroup, total_batches: Arc<RelaxedCounter>) -> Result<(), anyhow::Error> {
+
+    for serde_values in batch.iter() {
+        let values: HashMap<String, DataValue> = DataValue::new(serde_values.to_owned()).into();
+        session.execute(&preapared_statement, &values).await?;
+    }
+
+    wait_group.done();
+    total_batches.inc();
+
+    log::info!("Batch #{batch_id} uploaded", batch_id=total_batches.get());
+
+    Ok(())
 }
